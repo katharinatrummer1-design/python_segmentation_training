@@ -35,6 +35,9 @@ def _summary_stats(values: np.ndarray) -> tuple[float, float]:
 
 
 def _compute_delta(values: np.ndarray) -> np.ndarray:
+    # Delta features = first-order temporal derivative of the MFCC trajectory,
+    # approximated frame-to-frame with a central difference (np.gradient over the
+    # time axis). Captures how the spectral envelope CHANGES over the chirp.
     if values.shape[1] < 2:
         return np.zeros_like(values)
     return np.gradient(values, axis=1).astype(np.float32, copy=False)
@@ -82,6 +85,9 @@ def _power_to_db(power: np.ndarray) -> np.ndarray:
 
 
 def _spectral_rolloff(power_spectrum: np.ndarray, freqs: np.ndarray, roll_percent: float) -> np.ndarray:
+    # Spectral roll-off: per frame, the frequency (Hz) below which `roll_percent`
+    # (here 85 %) of the total spectral energy is contained. Found by walking the
+    # cumulative energy until it crosses the threshold. Output unit: Hz per frame.
     total_energy = np.sum(power_spectrum, axis=0)
     thresholds = total_energy * roll_percent
     cumulative = np.cumsum(power_spectrum, axis=0)
@@ -103,6 +109,11 @@ def _compute_time_frequency_representation(
     hop_length: int,
     win_length: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    # STFT length parameters are in SAMPLES (win_length / n_fft / hop_length);
+    # `fs=sr` (Hz) is only used so scipy returns `freqs` already in Hz.
+    #   nperseg = win_length -> analysis window length (samples)
+    #   nfft    = n_fft      -> zero-padded FFT length (samples); >= win_length
+    #   noverlap = win_length - hop_length -> overlap (samples) between frames
     freqs, _, zxx = stft(
         np.asarray(audio, dtype=np.float32),
         fs=sr,
@@ -112,9 +123,9 @@ def _compute_time_frequency_representation(
         boundary="zeros",
         padded=True,
     )
-    magnitude = np.abs(zxx).astype(np.float32, copy=False)
-    power = np.square(magnitude, dtype=np.float32)
-    return freqs.astype(np.float32, copy=False), power
+    magnitude = np.abs(zxx).astype(np.float32, copy=False)  # |X|, linear amplitude
+    power = np.square(magnitude, dtype=np.float32)           # |X|^2, power spectrum
+    return freqs.astype(np.float32, copy=False), power  # freqs in Hz, power per (bin, frame)
 
 
 def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> dict:
@@ -130,7 +141,12 @@ def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> di
     fmax_hz = float(features_config["fmax_hz"])
 
     frames = _frame_audio(audio_array, win_length, hop_length)
+    # RMS (root-mean-square) amplitude per frame: a per-frame loudness/energy
+    # proxy in linear amplitude units (unitless, since audio is in [-1, 1]).
     rms = np.sqrt(np.mean(np.square(frames), axis=1)).astype(np.float32, copy=False)
+    # Zero-crossing rate: fraction of adjacent samples whose sign flips within a
+    # frame (np.signbit detects sign, np.diff counts flips). Dimensionless in
+    # [0, 1]; higher ZCR ~ more high-frequency / noisy content.
     zcr = (
         np.sum(np.diff(np.signbit(frames), axis=1), axis=1).astype(np.float32)
         / max(1, win_length - 1)
@@ -147,9 +163,13 @@ def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> di
     magnitude_sum = np.sum(magnitude_spectrum, axis=0)
     safe_magnitude_sum = np.where(magnitude_sum > 0, magnitude_sum, 1.0)
 
+    # Spectral centroid (Hz): magnitude-weighted mean frequency per frame, i.e.
+    # the spectral "center of mass" / perceived brightness.
     spectral_centroid = (
         np.sum(freqs[:, None] * magnitude_spectrum, axis=0) / safe_magnitude_sum
     ).astype(np.float32, copy=False)
+    # Spectral bandwidth (Hz): magnitude-weighted standard deviation of frequency
+    # about the centroid -> how spread out the spectrum is per frame.
     spectral_bandwidth = np.sqrt(
         np.sum(
             ((freqs[:, None] - spectral_centroid[None, :]) ** 2) * magnitude_spectrum,
@@ -158,6 +178,8 @@ def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> di
         / safe_magnitude_sum
     ).astype(np.float32, copy=False)
     spectral_rolloff = _spectral_rolloff(power_spectrum, freqs, roll_percent=0.85)
+    # Spectral flatness (dimensionless, 0..1): geometric mean / arithmetic mean of
+    # the magnitude spectrum. ~1 = noise-like (flat), ~0 = tonal (peaky).
     spectral_flatness = (
         np.exp(np.mean(np.log(np.maximum(magnitude_spectrum, 1e-10)), axis=0))
         / np.maximum(np.mean(magnitude_spectrum, axis=0), 1e-10)
@@ -171,7 +193,11 @@ def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> di
         fmax=fmax_hz,
     )
     mel_power = np.maximum(mel_filter @ power_spectrum, 1e-10)
-    log_mel = _power_to_db(mel_power).astype(np.float32, copy=False)
+    log_mel = _power_to_db(mel_power).astype(np.float32, copy=False)  # log-mel, unit: dB
+    # MFCCs = type-2 DCT of the log-mel spectrum, keeping the first n_mfcc (13)
+    # coefficients. The DCT decorrelates the mel bands and compresses the spectral
+    # envelope; norm="ortho" makes the transform energy-preserving. Coefficient 0
+    # ~ overall log-energy, higher coefficients ~ finer spectral detail.
     mfcc = dct(log_mel, axis=0, type=2, norm="ortho")[:n_mfcc].astype(np.float32, copy=False)
     delta_mfcc = _compute_delta(mfcc)
 
@@ -180,8 +206,12 @@ def extract_features_for_segment(audio: np.ndarray, sr: int, config: dict) -> di
         peak_freq_hz = 0.0
         bandwidth_hz_proxy = 0.0
     else:
+        # peak_freq_hz: dominant frequency (Hz) = bin with the highest time-averaged
+        # magnitude. For crickets this tracks the carrier frequency of the chirp.
         peak_index = int(np.argmax(mean_spectrum))
         peak_freq_hz = float(freqs[peak_index])
+        # bandwidth_hz_proxy: width (Hz) of the band whose averaged magnitude is at
+        # least half the peak (the -6 dB-in-amplitude / "half-power" span).
         half_power = float(np.max(mean_spectrum) * 0.5)
         active_bins = np.flatnonzero(mean_spectrum >= half_power)
         bandwidth_hz_proxy = (

@@ -33,6 +33,10 @@ def _allocate_split_counts(
     if session_count <= 0:
         return (0, 0, 0)
 
+    # Largest-remainder (Hamilton) apportionment: floor each ideal count, then
+    # hand the leftover whole sessions to the splits with the biggest fractional
+    # remainders. Guarantees the integer counts sum exactly to session_count while
+    # staying as close as possible to the requested train/val/test ratios.
     raw_counts = [session_count * ratio for ratio in ratios]
     counts = [math.floor(count) for count in raw_counts]
     remainder = session_count - sum(counts)
@@ -49,6 +53,8 @@ def _allocate_split_counts(
         for index in ordering[:remainder]:
             counts[index] += 1
 
+    # Invariant: every individual MUST appear in train. If rounding left train
+    # empty, steal one session from the largest other split.
     if counts[0] == 0:
         donor_candidates = [
             index for index in range(1, len(counts)) if counts[index] > 0

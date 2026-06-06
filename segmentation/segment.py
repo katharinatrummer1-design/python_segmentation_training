@@ -34,6 +34,9 @@ def _compute_frame_rms(
             mode="constant",
         )
 
+    # Slice the signal into overlapping frames of `frame_length` SAMPLES, stepping
+    # by `hop_length` SAMPLES, then return the RMS amplitude of each frame. This
+    # RMS envelope is the energy curve segmentation thresholds against.
     frame_count = 1 + max(0, (working_audio.size - frame_length) // hop_length)
     starts = np.arange(frame_count, dtype=np.int64) * hop_length
     frames = np.stack(
@@ -70,12 +73,17 @@ def bandpass_filter(
     if audio.size == 0:
         return np.asarray(audio, dtype=np.float32)
 
+    # Nyquist frequency (Hz) = sr/2 is the highest representable frequency; the
+    # upper edge is clamped just below it so the filter design stays valid.
     nyquist_hz = sr / 2.0
     low_hz = max(1.0, float(fmin_hz))
     high_hz = min(float(fmax_hz), nyquist_hz * 0.99)
     if low_hz >= high_hz:
         return np.asarray(audio, dtype=np.float32).copy()
 
+    # 4th-order Butterworth band-pass, designed as second-order sections (SOS) for
+    # numerical stability. `fs=sr` lets cutoffs be given directly in Hz. sosfilt is
+    # causal (single forward pass) -> introduces phase delay but no future leakage.
     sos = butter(4, [low_hz, high_hz], btype="bandpass", fs=sr, output="sos")
     filtered = sosfilt(sos, np.asarray(audio, dtype=np.float32))
     return filtered.astype(np.float32, copy=False)
@@ -105,6 +113,9 @@ def highpass_filter(
         return audio_array.copy()
 
     sos = butter(order, cutoff, btype="highpass", fs=sr, output="sos")
+    # sosfiltfilt filters forward then backward -> ZERO phase distortion (chirp
+    # timing is preserved), at the cost of needing enough samples for the padding;
+    # fall back to the causal single-pass sosfilt for very short clips.
     if zero_phase and audio_array.size > 3 * (order + 1):
         filtered = sosfiltfilt(sos, audio_array)
     else:
@@ -168,6 +179,7 @@ def detect_segments(audio: np.ndarray, sr: int, config: dict) -> list[dict]:
         hop_length=hop_length,
     )
     peak_rms = float(np.max(rms)) if rms.size else 0.0
+    # Noise floor estimate: the 10th percentile of the RMS envelope (quiet frames).
     noise_floor = float(np.percentile(rms, 10)) if rms.size else 0.0
 
     if peak_rms <= 0.0:
@@ -179,9 +191,13 @@ def detect_segments(audio: np.ndarray, sr: int, config: dict) -> list[dict]:
             }
         ]
 
+    # Convert the configured "dB below peak" gate into a LINEAR amplitude threshold.
+    # For amplitude/RMS the dB relation is dB = 20*log10(amplitude ratio), so a
+    # ratio of 10**(dB/20). threshold_db_below_peak = -20 dB -> 10**(-1) = 0.1*peak.
+    # The effective threshold is never allowed below the noise floor.
     relative_threshold = peak_rms * (10.0 ** (threshold_db_below_peak / 20.0))
     threshold = max(noise_floor, relative_threshold)
-    active = rms >= threshold
+    active = rms >= threshold  # boolean envelope: True where a chirp is "on"
 
     regions: list[tuple[int, int]] = []
     start_frame: int | None = None
@@ -241,6 +257,10 @@ def detect_segments(audio: np.ndarray, sr: int, config: dict) -> list[dict]:
 
 
 def standardize_segment(audio: np.ndarray, sr: int, fixed_duration_s: float) -> np.ndarray:
+    # Force every chirp to exactly fixed_duration_s (0.5 s default) so all WAVs,
+    # feature frames and spectrograms share one length. target_samples =
+    # duration_s * sr. Shorter chirps are symmetrically zero-padded; longer chirps
+    # are symmetrically center-cropped (keeps the energetic middle of the chirp).
     target_samples = int(round(float(fixed_duration_s) * sr))
     segment_audio = np.asarray(audio, dtype=np.float32)
 
@@ -277,6 +297,9 @@ def compute_snr_proxy(segment_audio: np.ndarray, full_audio: np.ndarray) -> floa
     )
     noise_floor = float(np.percentile(full_rms, 10)) if full_rms.size else 0.0
     eps = 1e-10
+    # SNR proxy in dB: 20*log10(segment RMS / recording noise floor). It is a
+    # *proxy* (relative to a percentile-based noise estimate, not a calibrated
+    # noise reference), used only for QC flagging and diagnostics.
     return float(20.0 * np.log10(max(segment_rms, eps) / max(noise_floor, eps)))
 
 

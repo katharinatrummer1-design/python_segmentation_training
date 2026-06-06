@@ -488,6 +488,10 @@ def train_cnn_baseline(
     if train_targets.size == 0:
         raise ValueError("Train dataloader is empty after CNN sampling limits.")
 
+    # Class weights for the loss = inverse class frequency, so rare individuals
+    # contribute as much as common ones (counters class imbalance). The vector is
+    # normalised to sum to 1 and then rescaled by num_classes, so weights average
+    # ~1.0 and the loss magnitude stays comparable to the unweighted case.
     class_counts = np.bincount(train_targets, minlength=num_classes).astype(np.float32)
     inverse_frequency = np.where(class_counts > 0, 1.0 / class_counts, 0.0)
     class_weights = inverse_frequency / max(float(np.sum(inverse_frequency)), 1.0)
