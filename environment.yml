@@ -1,0 +1,43 @@
+# Conda-Umgebung für cricket_id.
+#
+# Erstellen / aktivieren:
+#   conda env create -f environment.yml
+#   conda activate cricket-id
+#   pip install -e .          # macht das Paket `cricket_id` importierbar
+#
+# Hinweis CUDA/GPU: Hier wird der CPU-Build von PyTorch installiert. Für CUDA das
+# passende Wheel von https://pytorch.org/get-started/locally/ verwenden und
+# `pytorch`/`torchvision` unten entfernen.
+name: cricket-id
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+
+  # --- Numerik / Daten ---
+  - numpy
+  - pandas
+  - scipy
+  - pyarrow            # Parquet-Engine (sonst transparenter Pickle-Fallback)
+
+  # --- Audio-I/O & DSP ---
+  - librosa            # Laden, Mono-Konvertierung, Resampling
+  - soundfile          # WAV lesen/schreiben (bindet natives libsndfile)
+
+  # --- ML / Modelle ---
+  - scikit-learn       # Scaler, PCA, Klassifikator, Metriken
+  - pytorch            # CNN-Training (CPU-Build via conda-forge)
+  - torchvision        # optionales resnet18-Backbone
+
+  # --- Visualisierung / Config / CLI ---
+  - matplotlib         # Figuren (Agg-Backend, headless)
+  - pyyaml             # YAML-Konfiguration
+  - typer              # CLI-Framework
+
+  # --- Tests / Entwicklung ---
+  - pytest
+
+  # Pip-Fallback für Pakete, die in den gewählten Channels evtl. fehlen.
+  - pip
+  - pip:
+      - soxr           # schneller Resampling-Kernel für librosa
